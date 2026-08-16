@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+*.tmp
+user_files/
+meta.json
+
+# Built releases only — NOT the .ankiaddon/ folder itself, which holds
+# build_release.py. A bare "*.ankiaddon" also matches the directory name, so git
+# never descends into it and the build script silently goes untracked.
+/.ankiaddon/*.ankiaddon

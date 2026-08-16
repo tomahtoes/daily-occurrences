@@ -1,0 +1,13 @@
+{
+  "websocket_url": "ws://localhost:6677",
+  "jiten_api_key": "",
+  "jiten_base_url": "https://api.jiten.moe",
+  "jiten_timeout_ms": 10000,
+  "flush_every_lines": 50,
+  "idle_flush_seconds": 30,
+  "dedupe_window_lines": 500,
+  "max_line_length": 150,
+  "day_cutoff_hour": null,
+  "delete_after_days": 60,
+  "output_dir": ""
+}
