@@ -13,9 +13,7 @@ It runs quietly in the background whenever Anki is open, reconnecting on its own
 
 ## Install
 
-**From AnkiWeb:** open *Tools → Add-ons → Get Add-ons…* and paste the add-on code. Restart Anki after installing.
-
-> ⟹⟹⟹ **ADD-ON CODE GOES HERE** ⟸⟸⟸
+Install from [AnkiWeb](https://ankiweb.net/shared/info/294730816).
 
 ## Setup
 
