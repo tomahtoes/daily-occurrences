@@ -1,6 +1,6 @@
 # Daily Occurrences
 
-An Anki add-on that builds a **daily occurrence dictionary** from your immersion. It connects to a websocket that streams the Japanese text you're reading (and can also follow the ebooks you read in Hoshi Reader), parses each line with the **Jiten reader API**, and writes a per-day frequency list of every word that appeared.
+An Anki add-on that builds a **daily occurrence dictionary** from your immersion. It connects to a websocket that streams the Japanese text you're reading (and can also follow the ebooks you read in [Hoshi Reader](https://github.com/Manhhao/Hoshi-Reader-Desktop)), parses each line with the **Jiten reader API**, and writes a per-day frequency list of every word that appeared.
 
 It's built to feed the **Priority Reorder** add-on: point its output at Priority Reorder's `_seen` folder and the words you read each day automatically become available to that add-on's `seen:` prioritization. See [Pointing it at Priority Reorder](#pointing-it-at-priority-reorder).
 
@@ -65,7 +65,7 @@ Sharing that folder is safe. A day folder that this add-on didn't write is never
 
 ## Reading ebooks in Hoshi Reader
 
-Set `hoshi_enabled` to `true` and ebooks you read in **Hoshi Reader Desktop** are recorded alongside your websocket text, into the same daily dictionaries. Reading done in Hoshi on your phone counts too, once Hoshi Desktop has synced it.
+Set `hoshi_enabled` to `true` and ebooks you read in **[Hoshi Reader Desktop](https://github.com/Manhhao/Hoshi-Reader-Desktop)** are recorded alongside your websocket text, into the same daily dictionaries. Reading done in Hoshi on your phone counts too, once Hoshi Desktop has synced it.
 
 Hoshi keeps each book's EPUB, your current position, and (if you let it) your reading sessions in its library folder. Every `hoshi_poll_minutes` the add-on looks at how far each book has moved since it last looked, cuts that stretch of text out of the EPUB, and records its words — into the day you read them, which for synced phone reading may be an earlier day.
 
