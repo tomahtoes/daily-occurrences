@@ -64,10 +64,11 @@ class DayDict:
         return os.path.join(output_dir, day)
 
     @classmethod
-    def load_from_dir(cls, output_dir, day):
+    def load_from_dir(cls, output_dir, day, strict=False):
         """Load an existing day's dictionary. Returns None if the folder is
         absent, or if it holds a dictionary this add-on didn't write — see
-        ``day_is_foreign``."""
+        ``day_is_foreign``. With ``strict``, an unreadable bank raises instead of
+        being skipped: a caller about to rewrite the day must not drop its counts."""
         directory = cls.day_dir(output_dir, day)
         if not os.path.isdir(directory) or day_is_foreign(output_dir, day):
             return None
@@ -81,6 +82,8 @@ class DayDict:
                 with open(bank, "r", encoding="utf-8") as handle:
                     entries = json.load(handle)
             except (OSError, ValueError) as err:
+                if strict:
+                    raise
                 # A truncated bank (interrupted write, power loss) must not abort
                 # the load: this also runs on the worker thread, where raising
                 # would end recording for the rest of the session.

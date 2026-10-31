@@ -14,6 +14,7 @@ from aqt import gui_hooks, mw
 from aqt.qt import QAction
 
 from . import summary
+from .hoshi_source import HoshiSettings, HoshiSource, default_books_dir
 from .logsetup import LOG_NAME, setup_logging
 from .recorder import Recorder, Settings
 
@@ -24,6 +25,7 @@ ADDON_DIR = os.path.dirname(__file__)
 log = logging.getLogger(LOG_NAME)
 
 _recorder = None
+_hoshi = None  # HoshiSource, while hoshi_enabled
 
 # Whether the last _start() found no API key. Cached rather than re-read on every
 # summary refresh, and used to explain the idle engine in the summary window.
@@ -47,6 +49,10 @@ _DEFAULTS = {
     "day_cutoff_hour": None,
     "delete_after_days": 60,
     "output_dir": "",
+    "hoshi_enabled": False,
+    "hoshi_books_dir": "",
+    "hoshi_poll_minutes": 1,
+    "hoshi_max_chars_per_minute": 1000,
 }
 
 
@@ -89,6 +95,8 @@ _MINIMUMS = {
     "dedupe_window_lines": 0,
     "max_line_length": 0,
     "delete_after_days": 0,
+    "hoshi_poll_minutes": 1,
+    "hoshi_max_chars_per_minute": 100,
 }
 
 
@@ -105,13 +113,34 @@ def _int(cfg, key):
     return value
 
 
-def _build_settings():
-    cfg = mw.addonManager.getConfig(__name__) or {}
+def _websocket_url(cfg):
+    """The configured websocket, or "" for none: a key that is present but blank
+    turns the websocket off, for reading only through Hoshi."""
+    value = cfg.get("websocket_url", _DEFAULTS["websocket_url"])
+    if not isinstance(value, str):
+        return _DEFAULTS["websocket_url"]
+    return value.strip()
+
+
+def _build_hoshi_settings(cfg, settings):
+    books_dir = (cfg.get("hoshi_books_dir") or "").strip() or default_books_dir()
+    return HoshiSettings(
+        books_dir=books_dir,
+        poll_minutes=_int(cfg, "hoshi_poll_minutes"),
+        max_cpm=_int(cfg, "hoshi_max_chars_per_minute"),
+        state_path=os.path.join(_user_files(), "hoshi-state.json"),
+        output_dir=settings.output_dir,
+        cutoff_hour=settings.day_cutoff_hour,
+        keep_days=settings.delete_after_days,
+    )
+
+
+def _build_settings(cfg):
     output_dir = (cfg.get("output_dir") or "").strip()
     if not output_dir:
         output_dir = os.path.join(_user_files(), "occurrence-dicts")
     return Settings(
-        websocket_url=cfg.get("websocket_url") or _DEFAULTS["websocket_url"],
+        websocket_url=_websocket_url(cfg),
         jiten_api_key=cfg.get("jiten_api_key") or "",
         jiten_base_url=cfg.get("jiten_base_url") or _DEFAULTS["jiten_base_url"],
         jiten_timeout_ms=_int(cfg, "jiten_timeout_ms"),
@@ -129,7 +158,8 @@ def _start():
     global _recorder, _no_api_key
     if _recorder is not None:
         return
-    settings = _build_settings()
+    cfg = mw.addonManager.getConfig(__name__) or {}
+    settings = _build_settings(cfg)
     _no_api_key = not settings.jiten_api_key
     if _no_api_key:
         # Every request would be rejected, so connecting buys nothing and costs
@@ -156,10 +186,33 @@ def _start():
                 log.exception("error while cleaning up a failed start")
         return
     _recorder = engine
+    if cfg.get("hoshi_enabled") is True:
+        _start_hoshi(_build_hoshi_settings(cfg, settings), engine)
+
+
+def _start_hoshi(hoshi_settings, engine):
+    global _hoshi
+    source = HoshiSource(hoshi_settings, engine.submit_hoshi)
+    try:
+        source.start()
+    except Exception:
+        log.exception("failed to start the Hoshi source")
+        source.stop()
+        return
+    _hoshi = source
 
 
 def _stop():
-    global _recorder
+    global _recorder, _hoshi
+    # The source first: it may be waiting on a chunk the recorder is about to
+    # stop answering, and it cancels that chunk on the way out.
+    if _hoshi is not None:
+        try:
+            _hoshi.stop()
+        except Exception:
+            log.exception("error while stopping the Hoshi source")
+        finally:
+            _hoshi = None
     if _recorder is None:
         return
     try:
@@ -194,6 +247,7 @@ def _current_snapshot():
         snap = _recorder.state().snapshot()
     else:
         snap = {
+            "websocket": True,
             "connected": False,
             "day": "—",
             "distinct": 0,
@@ -207,6 +261,7 @@ def _current_snapshot():
         }
     # Stamped on here rather than reported by the engine: this is the authority.
     snap["paused"] = _paused
+    snap["hoshi"] = _hoshi.snapshot() if _hoshi is not None else None
     return snap
 
 

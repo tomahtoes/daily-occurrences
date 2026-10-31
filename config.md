@@ -43,7 +43,8 @@ replaced with a sane one rather than accepted — the substitution is noted in
 
 ### `websocket_url`
 The websocket to read text from. Default `ws://localhost:6677`. Point this at
-whatever your text source exposes.
+whatever your text source exposes. Set it to `""` to turn the websocket off — for
+when you only read ebooks through Hoshi Reader (below).
 
 ### `jiten_api_key`
 **Required.** Your Jiten API key. Empty means recording is disabled.
@@ -97,6 +98,41 @@ Where daily dictionary folders are written. Empty (the default) uses
 to write elsewhere — typically the **Priority Reorder** add-on's `user_files/_seen`
 folder, so each day's words feed its `seen:` search. This is JSON, so on Windows
 escape each backslash (`\\`) or use forward slashes.
+
+---
+
+## Hoshi Reader (ebooks)
+
+With `hoshi_enabled` on, ebooks you read in **Hoshi Reader Desktop** are recorded
+too: the add-on checks Hoshi's library every few minutes, works out which text
+you read since last time, and records its words into the right day — including
+reading done on your phone, once Hoshi Desktop has synced it.
+
+- Turn on **statistics autostart** in Hoshi's settings. It's what lets the add-on
+  tell real reading from skipping ahead through the table of contents.
+- Forgetting the stats is fine: reading with no stats behind it is still counted
+  in full.
+- Books you'd already read when you turned this on aren't backfilled; recording
+  starts from where each book is now.
+- A book synced from another device is recorded once Hoshi Desktop has
+  downloaded it (open it there once).
+- Only run this in one program: if another program is also reading your Hoshi library
+  into the same folder, the add-on notices and leaves it to that program.
+
+### `hoshi_enabled`
+`true` to record Hoshi reading. Default `false`.
+
+### `hoshi_books_dir`
+Hoshi's library folder. Empty (the default) finds it automatically
+(`%APPDATA%\hoshi-reader\Books` on Windows).
+
+### `hoshi_poll_minutes`
+How often to check Hoshi, in minutes. Default `1`, minimum `1`.
+
+### `hoshi_max_chars_per_minute`
+The fastest reading speed the add-on will believe, in characters per minute.
+Default `1000`, minimum `100`. Movement faster than this while Hoshi's stats were
+running is treated as skipping. Raise it only if you genuinely read faster.
 
 ---
 

@@ -108,7 +108,9 @@ class SummaryDialog(QDialog):
         self._day = QLabel()
         self._distinct = QLabel()
         self._total = QLabel()
-        for label in (self._day, self._distinct, self._total):
+        self._hoshi = QLabel()  # only while the Hoshi source is enabled
+        self._hoshi.setWordWrap(True)
+        for label in (self._day, self._distinct, self._total, self._hoshi):
             layout.addWidget(label)
 
         # Shown only when something is wrong. A rejected key, an unreachable API
@@ -145,26 +147,37 @@ class SummaryDialog(QDialog):
 
     def _refresh(self):
         snap = self._get_snapshot()
+        hoshi = snap.get("hoshi")
+        hoshi_live = bool(hoshi) and hoshi["status"] == "watching"
+        # With no websocket configured, the dot follows the Hoshi source instead.
+        live = snap["connected"] if snap.get("websocket", True) else hoshi_live
         if snap["paused"]:
             self._dot.set_colors(_CONNECTED, _DISCONNECTED)
             text = "Paused"
         else:
-            self._dot.set_colors(_CONNECTED if snap["connected"] else _DISCONNECTED)
-            text = "Connected" if snap["connected"] else "Not connected"
+            self._dot.set_colors(_CONNECTED if live else _DISCONNECTED)
+            if not snap.get("websocket", True):
+                text = "Websocket off"
+            else:
+                text = "Connected" if snap["connected"] else "Not connected"
         self._status.setText(text)
         # Caption derived from state on every tick, so it can never drift out of
         # sync with what the engine is actually doing.
         self._toggle.setText("Resume recording" if snap["paused"] else "Pause recording")
         # Nothing to pause while there's no stream — but stay visible whenever
-        # paused, or a drop mid-pause would leave no way to resume.
+        # paused, or a drop mid-pause would leave no way to resume. Hoshi doesn't
+        # count: pause doesn't apply to it.
         self._button_row.setVisible(snap["connected"] or snap["paused"])
         self._day.setText(f'Recording for: <b>{snap["day"]}</b>')
         self._distinct.setText(f'Distinct terms today: <b>{snap["distinct"]}</b>')
         self._total.setText(f'Total terms today: <b>{snap["total"]}</b>')
-        error = snap.get("error")
-        if error:
-            self._error.setText(error)
-        self._error.setVisible(bool(error))
+        self._hoshi.setVisible(bool(hoshi))
+        if hoshi:
+            self._hoshi.setText(_hoshi_line(hoshi))
+        errors = [e for e in (snap.get("error"), hoshi and hoshi.get("error")) if e]
+        if errors:
+            self._error.setText("\n".join(errors))
+        self._error.setVisible(bool(errors))
 
     def _on_toggle(self):
         # Read fresh rather than trusting the last tick, then repaint at once so the
@@ -198,6 +211,22 @@ class SummaryDialog(QDialog):
         # timer used to outlive the window.
         self._timer.stop()
         super().done(result)
+
+
+def _hoshi_line(hoshi):
+    """One line on the Hoshi source: how many books it watches, what it has
+    recorded today, and anything still waiting."""
+    if hoshi["status"] == "watching":
+        books = hoshi["books"]
+        parts = [f'watching {books} book{"" if books == 1 else "s"}',
+                 f'<b>{hoshi["chars_today"]:,}</b> chars recorded today']
+    else:
+        parts = [hoshi["status"]]
+    if hoshi["pending_chars"]:
+        parts.append(f'{hoshi["pending_chars"]:,} chars queued')
+    if hoshi["awaiting"]:
+        parts.append(f'{hoshi["awaiting"]} awaiting download in Hoshi')
+    return "Hoshi: " + " · ".join(parts)
 
 
 def show_summary(parent, get_snapshot, set_paused):

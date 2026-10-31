@@ -9,6 +9,15 @@ Two background threads cooperate through a queue:
   records the resulting words into the current day's dictionary, and persists it
   to disk.
 
+The worker also takes **Hoshi chunks** (``HoshiChunk``): lines from an ebook that
+the Hoshi source has already decided were read, tagged with the day they belong
+to, which may be a past day. They skip the dedup window and the line-length guard
+(both exist for misbehaving live sources), and each is answered individually so
+the source can commit its own state only once the words are on disk.
+
+The websocket is optional: with a blank ``websocket_url`` only Hoshi chunks are
+recorded.
+
 The engine can also be *paused*, in which case every arriving line is discarded in
 ``_ingest`` — nothing is buffered for later. The socket and its reconnect backoff
 are left alone, so resuming costs nothing, and the worker keeps running, so lines
@@ -61,11 +70,59 @@ class Settings:
     output_dir: str
 
 
+class HoshiChunk:
+    """One batch of Hoshi lines for ``day``, answered exactly once.
+
+    ``status`` moves from ``pending`` to one of ``recorded`` (the words are
+    recorded), ``transient`` (try again later), ``permanent`` (drop it) or
+    ``cancelled`` (the source gave up waiting). Recording and cancelling both
+    happen under ``lock``, so a chunk can never be both recorded and given up on:
+    whichever side gets there first wins, and the source commits only a
+    ``recorded`` chunk."""
+
+    def __init__(self, day, lines):
+        self.day = day
+        self.lines = lines
+        self.lock = threading.Lock()
+        self.status = "pending"
+        self.error = None
+        self.done = threading.Event()
+
+    def finish(self, status, error=None):
+        with self.lock:
+            if self.status != "pending":
+                return
+            self.status = status
+            self.error = error
+        self.done.set()
+
+    def cancel(self):
+        """Give up on the chunk unless it was already answered. Returns the final
+        status."""
+        with self.lock:
+            if self.status == "pending":
+                self.status = "cancelled"
+            status = self.status
+        self.done.set()
+        return status
+
+
+def _transient(err):
+    """Whether a reader-API failure is worth retrying. Rate limits, server errors,
+    transport failures and a rejected key (the user can fix it) are; any other 4xx
+    means this request itself is unacceptable and would fail forever."""
+    if isinstance(err, JitenError):
+        status = err.status
+        return status is None or status in (401, 403, 408, 429) or status >= 500
+    return True
+
+
 class _State:
     """Shared state read by the summary window; guarded by a single lock."""
 
     def __init__(self):
         self.lock = threading.Lock()
+        self.websocket = True  # whether a websocket source is configured at all
         self.connected = False
         self.current = None  # DayDict
         self.error = None    # last user-facing problem, or None
@@ -76,6 +133,7 @@ class _State:
             distinct = self.current.unique_words() if self.current else 0
             total = self.current.total_occurrences() if self.current else 0
             return {
+                "websocket": self.websocket,
                 "connected": self.connected,
                 "day": day,
                 "distinct": distinct,
@@ -131,15 +189,20 @@ class Recorder:
         if not self.settings.jiten_api_key:
             log.warning("no Jiten API key set; recording will not work until one is configured")
 
-        self._ws_thread = threading.Thread(
-            target=self._ws_loop, name="daily-occ-ws", daemon=True
-        )
         self._worker_thread = threading.Thread(
             target=self._worker_loop, name="daily-occ-worker", daemon=True
         )
-        self._ws_thread.start()
         self._worker_thread.start()
-        log.info("started; reading %s", self.settings.websocket_url)
+        if self.settings.websocket_url:
+            self._ws_thread = threading.Thread(
+                target=self._ws_loop, name="daily-occ-ws", daemon=True
+            )
+            self._ws_thread.start()
+            log.info("started; reading %s", self.settings.websocket_url)
+        else:
+            with self._state.lock:
+                self._state.websocket = False
+            log.info("started; no websocket configured")
 
     def stop(self):
         self._stop.set()
@@ -159,6 +222,14 @@ class Recorder:
 
     def state(self):
         return self._state
+
+    def submit_hoshi(self, chunk):
+        """Queue a Hoshi chunk for the worker. Safe from any thread; a stopped
+        engine answers at once so the caller never waits on a dead queue."""
+        if self._stop.is_set():
+            chunk.finish("transient", "recorder stopped")
+            return
+        self._queue.put(chunk)
 
     def set_paused(self, value):
         """Pause or resume ingestion. While paused, arriving lines are discarded
@@ -323,6 +394,10 @@ class Recorder:
                 except queue.Empty:
                     line = None
 
+                if isinstance(line, HoshiChunk):
+                    self._record_hoshi(line)
+                    continue
+
                 if line is not None:
                     last_recv = time.monotonic()
                     batch.append(line)
@@ -404,6 +479,85 @@ class Recorder:
             self._set_error(
                 "The reader API returned no usable words — recording may be broken."
             )
+
+    def _record_hoshi(self, chunk):
+        """Parse a Hoshi chunk, record it into its day, and answer it. Always
+        answers, so the source waiting on it can't hang on an exception here."""
+        try:
+            self._record_hoshi_inner(chunk)
+        except Exception as err:
+            log.exception("hoshi chunk failed")
+            chunk.finish("transient", str(err))
+
+    def _record_hoshi_inner(self, chunk):
+        try:
+            parsed = self._jiten.parse_lines(chunk.lines)
+        except Exception as err:
+            if isinstance(err, JitenError):
+                self._set_error(err.user_message())
+            else:
+                self._set_error(f"Can't reach the Jiten API: {err}")
+            chunk.finish("transient" if _transient(err) else "permanent", str(err))
+            return
+        # Same reasoning as _flush_batch: a stopped engine must not write.
+        if self._stop.is_set():
+            chunk.finish("transient", "recorder stopped")
+            return
+
+        self._ensure_day()
+        with self._state.lock:
+            current_day = self._state.current.day if self._state.current else None
+        if chunk.day == current_day:
+            with chunk.lock:
+                if chunk.status != "pending":
+                    return
+                with self._state.lock:
+                    current = self._state.current
+                    for words in parsed:
+                        for headword, reading in words:
+                            current.record(headword, reading)
+                chunk.status = "recorded"
+            chunk.done.set()
+            self._dirty = True
+            self._set_error(None)
+            # Saved now rather than on the usual cadence: the source commits its
+            # state as soon as the chunk is answered, so the words should already
+            # be on disk for a crash to lose nothing.
+            self._persist()
+            return
+
+        # Any other day is merged straight into its folder. Only the current day
+        # is held in memory, so nothing else is rewriting this one.
+        output_dir = self.settings.output_dir
+        if day_is_foreign(output_dir, chunk.day):
+            chunk.finish("permanent", f"{chunk.day} holds a dictionary this add-on didn't write")
+            return
+        with chunk.lock:
+            if chunk.status != "pending":
+                return
+            with self._write_lock:
+                try:
+                    day = DayDict.load_from_dir(output_dir, chunk.day, strict=True) or DayDict(chunk.day)
+                except (OSError, ValueError) as err:
+                    # Rewriting the day without the bank it couldn't read would
+                    # lose that bank's counts; wait and try again instead.
+                    log.error("can't read %s: %s", chunk.day, err)
+                    chunk.status, chunk.error = "transient", f"can't read {chunk.day}: {err}"
+                    chunk.done.set()
+                    return
+                for words in parsed:
+                    for headword, reading in words:
+                        day.record(headword, reading)
+                try:
+                    day.write_to_dir(output_dir)
+                except OSError as err:
+                    log.error("flush failed for %s: %s", chunk.day, err)
+                    chunk.status, chunk.error = "transient", str(err)
+                    chunk.done.set()
+                    return
+            chunk.status = "recorded"
+        chunk.done.set()
+        self._set_error(None)
 
     def _ensure_day(self):
         """Roll over to a new day's dictionary if the cutoff boundary passed,

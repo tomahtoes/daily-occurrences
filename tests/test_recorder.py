@@ -253,5 +253,128 @@ class Persistence(unittest.TestCase):
         self.assertEqual(loaded.unique_words(), 300)
 
 
+class _FakeJiten:
+    """Every line parses to one 本; ``error`` makes every request fail instead."""
+
+    def __init__(self, error=None):
+        self.error = error
+        self.calls = 0
+
+    def parse_lines(self, lines):
+        self.calls += 1
+        if self.error is not None:
+            raise self.error
+        return [[("本", "ほん")] for _ in lines]
+
+
+class HoshiChunks(unittest.TestCase):
+    """The worker's Hoshi path: a chunk lands in its own day (today's dictionary or
+    a past day's folder), is answered exactly once, and a cancelled or failed one
+    leaves no words behind."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="daily-occ-test-")
+        self.rec = recorder.Recorder(_settings(output_dir=self.tmp))
+        self.rec._jiten = _FakeJiten()
+        self.today = recorder.now_day_key(4)
+        self.rec._adopt_day(self.today)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _count(self, day):
+        loaded = recorder.DayDict.load_from_dir(self.tmp, day)
+        return loaded.counts.get(("本", "ほん"), 0) if loaded else 0
+
+    def test_a_chunk_for_today_is_recorded_and_saved_at_once(self):
+        chunk = recorder.HoshiChunk(self.today, ["一行目。", "二行目。"])
+        self.rec._record_hoshi(chunk)
+        self.assertEqual(chunk.status, "recorded")
+        self.assertTrue(chunk.done.is_set())
+        self.assertEqual(self._count(self.today), 2)
+
+    def test_a_chunk_for_a_past_day_merges_into_that_folder(self):
+        earlier = recorder.DayDict("2026-01-01", {("本", "ほん"): 2})
+        earlier.write_to_dir(self.tmp)
+        chunk = recorder.HoshiChunk("2026-01-01", ["あ。", "い。", "う。"])
+        self.rec._record_hoshi(chunk)
+        self.assertEqual(chunk.status, "recorded")
+        self.assertEqual(self._count("2026-01-01"), 5)
+        # Today's dictionary is untouched.
+        self.assertEqual(self.rec.state().snapshot()["total"], 0)
+
+    def test_a_past_day_that_cant_be_read_is_retried_not_overwritten(self):
+        recorder.DayDict("2026-01-01", {("本", "ほん"): 2}).write_to_dir(self.tmp)
+        bank = os.path.join(self.tmp, "2026-01-01", "term_meta_bank_1.json")
+        with open(bank, "w", encoding="utf-8") as handle:
+            handle.write("[[\"本\", \"freq")  # truncated mid-write
+        chunk = recorder.HoshiChunk("2026-01-01", ["あ。"])
+        self.rec._record_hoshi(chunk)
+        self.assertEqual(chunk.status, "transient")
+        with open(bank, encoding="utf-8") as handle:
+            self.assertEqual(handle.read(), "[[\"本\", \"freq")
+
+    def test_a_foreign_past_day_is_refused_and_left_alone(self):
+        directory = os.path.join(self.tmp, "2026-01-01")
+        os.makedirs(directory)
+        with open(os.path.join(directory, "index.json"), "w", encoding="utf-8") as handle:
+            json.dump({"title": "Some Other Dictionary"}, handle)
+        chunk = recorder.HoshiChunk("2026-01-01", ["あ。"])
+        self.rec._record_hoshi(chunk)
+        self.assertEqual(chunk.status, "permanent")
+        self.assertEqual(os.listdir(directory), ["index.json"])
+
+    def test_rate_limits_are_retried_and_bad_requests_dropped(self):
+        for status, expected in ((429, "transient"), (503, "transient"), (401, "transient"),
+                                 (400, "permanent"), (None, "transient")):
+            self.rec._jiten = _FakeJiten(recorder.JitenError("no", status=status))
+            chunk = recorder.HoshiChunk(self.today, ["あ。"])
+            self.rec._record_hoshi(chunk)
+            self.assertEqual(chunk.status, expected, status)
+        self.assertEqual(self._count(self.today), 0)
+
+    def test_a_chunk_cancelled_before_it_is_recorded_leaves_no_words(self):
+        chunk = recorder.HoshiChunk(self.today, ["あ。"])
+        self.assertEqual(chunk.cancel(), "cancelled")
+        self.rec._record_hoshi(chunk)
+        self.assertEqual(chunk.status, "cancelled")
+        self.assertEqual(self.rec.state().snapshot()["total"], 0)
+
+    def test_a_chunk_is_recorded_while_paused(self):
+        # Pause is for the websocket. A Hoshi chunk can carry reading done long
+        # before (a phone session syncing in); discarding it would lose it for good.
+        self.rec.set_paused(True)
+        chunk = recorder.HoshiChunk(self.today, ["あ。"])
+        self.rec._record_hoshi(chunk)
+        self.assertEqual(chunk.status, "recorded")
+        self.assertEqual(self._count(self.today), 1)
+
+    def test_a_chunk_answered_first_cannot_be_cancelled(self):
+        chunk = recorder.HoshiChunk(self.today, ["あ。"])
+        self.rec._record_hoshi(chunk)
+        self.assertEqual(chunk.cancel(), "recorded")
+
+    def test_a_stopped_engine_answers_at_once(self):
+        self.rec._stop.set()
+        chunk = recorder.HoshiChunk(self.today, ["あ。"])
+        self.rec.submit_hoshi(chunk)
+        self.assertEqual(chunk.status, "transient")
+        self.assertTrue(self.rec._queue.empty())
+
+    def test_a_blank_websocket_url_starts_no_websocket(self):
+        rec = recorder.Recorder(_settings(output_dir=self.tmp, websocket_url=""))
+        rec.start()
+        try:
+            self.assertIsNone(rec._ws_thread)
+            self.assertFalse(rec.state().snapshot()["websocket"])
+            chunk = recorder.HoshiChunk(rec.state().snapshot()["day"], ["あ。"])
+            rec._jiten = _FakeJiten()
+            rec.submit_hoshi(chunk)
+            self.assertTrue(chunk.done.wait(5))
+            self.assertEqual(chunk.status, "recorded")
+        finally:
+            rec.stop()
+
+
 if __name__ == "__main__":
     unittest.main()

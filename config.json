@@ -9,5 +9,9 @@
   "max_line_length": 150,
   "day_cutoff_hour": null,
   "delete_after_days": 60,
-  "output_dir": ""
+  "output_dir": "",
+  "hoshi_enabled": false,
+  "hoshi_books_dir": "",
+  "hoshi_poll_minutes": 1,
+  "hoshi_max_chars_per_minute": 1000
 }
